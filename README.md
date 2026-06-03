@@ -75,6 +75,7 @@ It runs with the rights of an ordinary domain user from a domain‑joined workst
 | `-ThrottleLimit <n>` | `8` | Max concurrent host scans. |
 | `-InspectConfigContent` | off | **Reads content** of *name‑matched* config files and adds a keyword hint. Only enable if your authorization covers reading file contents. |
 | `-ScanContent` | off | **Deep content scan** (reads bytes): runs secret/PII rules over eligible text files regardless of filename. See *Content detection* below. Reads content — authorization required. |
+| `-ContentRuleSet <Minimal\|Standard\|Aggressive>` | `Standard` | Which `-ScanContent` rules run, trading false positives for coverage. |
 | `-MaxInspectBytes <n>` | `262144` | Byte cap per file for `-InspectConfigContent` / `-ScanContent`. |
 | `-OutputDirectory <path>` | `.\ShareAudit_<timestamp>` | Where results are written. |
 

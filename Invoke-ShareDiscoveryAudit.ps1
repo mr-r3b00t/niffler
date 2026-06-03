@@ -61,6 +61,15 @@
     misses. Evidence is REDACTED in output. Reads file CONTENT - authorization
     required.
 
+.PARAMETER ContentRuleSet
+    Which -ScanContent rules to run (trades false positives for coverage):
+      Minimal    - high-confidence only (private keys, cloud tokens, WireGuard keys,
+                   Luhn-valid cards). Lowest noise.
+      Standard   - Minimal + VPN PSKs, connection-string/API-key assignments, JWTs,
+                   keyword-anchored SSNs. Default.
+      Aggressive - Standard + broad rules: generic password= and bare NNN-NN-NNNN
+                   SSNs. Highest coverage, more false positives.
+
 .PARAMETER MaxInspectBytes
     Cap on bytes read per file for -InspectConfigContent and -ScanContent. Default 262144.
 
@@ -115,6 +124,8 @@ param(
     [switch]   $InspectConfigContent,
     [switch]   $ScanContent,        # deep content scan: read eligible text files and match
                                     # secret/PII rules regardless of filename (reads CONTENT)
+    [ValidateSet('Minimal', 'Standard', 'Aggressive')]
+    [string]   $ContentRuleSet = 'Standard',  # which -ScanContent rules to run (FP vs coverage)
     [int]      $MaxInspectBytes = 262144
 )
 
@@ -238,42 +249,52 @@ $script:SecretContentRegex = '(?i)(connectionstring|password\s*=|passwd|pwd\s*=|
 # Content-scan rules (used only with -ScanContent). Each rule matches file
 # CONTENT regardless of name. Evidence is redacted before it is written out.
 # Single-quoted regex strings keep PowerShell from interpreting $ and ` .
+#
+# Tier controls which rules run via -ContentRuleSet:
+#   Minimal    = high-confidence, low false-positive (specific token/key formats)
+#   Standard   = Minimal + medium-confidence rules (default)
+#   Aggressive = Standard + broad/noisy rules (generic password=, bare SSNs)
 # --------------------------------------------------------------------------- #
 $script:ContentRules = @(
-    [pscustomobject]@{ Name = 'PrivateKeyBlock';   Category = 'Keys-Certificates';  Severity = 'High'
+    [pscustomobject]@{ Name = 'PrivateKeyBlock';   Tier = 'Minimal';    Category = 'Keys-Certificates';  Severity = 'High'
         Regex = '-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----' }
-    [pscustomobject]@{ Name = 'PuttyKeyFile';      Category = 'Keys-Certificates';  Severity = 'High'
+    [pscustomobject]@{ Name = 'PuttyKeyFile';      Tier = 'Minimal';    Category = 'Keys-Certificates';  Severity = 'High'
         Regex = '(?i)PuTTY-User-Key-File' }
-    [pscustomobject]@{ Name = 'WireGuardKey';      Category = 'VPN-Profile';        Severity = 'High'
+    [pscustomobject]@{ Name = 'WireGuardKey';      Tier = 'Minimal';    Category = 'VPN-Profile';        Severity = 'High'
         Regex = '(?im)^\s*(?:PrivateKey|PresharedKey)\s*=\s*[A-Za-z0-9+/]{42,}=' }
-    [pscustomobject]@{ Name = 'WireGuardPeer';     Category = 'VPN-Profile';        Severity = 'Medium'
-        Regex = '(?im)^\s*\[(?:Interface|Peer)\]\s*$' }
-    [pscustomobject]@{ Name = 'IPsecPSK';          Category = 'VPN-Profile';        Severity = 'High'
-        Regex = '(?i)\bPSK\s+\S{3,}' }
-    [pscustomobject]@{ Name = 'CiscoType7';        Category = 'VPN-Profile';        Severity = 'Medium'
-        Regex = '(?i)\b(?:password|secret)\s+7\s+[0-9A-Fa-f]{4,}' }
-    [pscustomobject]@{ Name = 'ConnStringPassword';Category = 'Config-WithSecrets'; Severity = 'High'
-        Regex = '(?i)(?:data source|server|initial catalog)\s*=[^\r\n]{0,80}?(?:password|pwd)\s*=\s*\S{2,}' }
-    [pscustomobject]@{ Name = 'GenericPassword';   Category = 'Credential-Store';   Severity = 'Medium'
-        Regex = '(?im)\b(?:password|passwd|pwd)\b\s*[:=]\s*\S{4,}' }
-    [pscustomobject]@{ Name = 'ApiKeyAssignment';  Category = 'Cloud-Secrets';      Severity = 'High'
-        Regex = '(?i)\b(?:api[_-]?key|access[_-]?token|secret[_-]?key|client[_-]?secret|auth[_-]?token)\b\s*[:=]\s*\S{12,}' }
-    [pscustomobject]@{ Name = 'AwsAccessKeyId';    Category = 'Cloud-Secrets';      Severity = 'High'
+    [pscustomobject]@{ Name = 'AwsAccessKeyId';    Tier = 'Minimal';    Category = 'Cloud-Secrets';      Severity = 'High'
         Regex = '\bAKIA[0-9A-Z]{16}\b' }
-    [pscustomobject]@{ Name = 'AwsSecretKey';      Category = 'Cloud-Secrets';      Severity = 'High'
+    [pscustomobject]@{ Name = 'AwsSecretKey';      Tier = 'Minimal';    Category = 'Cloud-Secrets';      Severity = 'High'
         Regex = '(?i)aws_secret_access_key\s*=\s*[A-Za-z0-9/+]{40}' }
-    [pscustomobject]@{ Name = 'AzureStorageKey';   Category = 'Cloud-Secrets';      Severity = 'High'
+    [pscustomobject]@{ Name = 'AzureStorageKey';   Tier = 'Minimal';    Category = 'Cloud-Secrets';      Severity = 'High'
         Regex = '(?i)AccountKey=[A-Za-z0-9+/]{86}==' }
-    [pscustomobject]@{ Name = 'SlackToken';        Category = 'Cloud-Secrets';      Severity = 'High'
+    [pscustomobject]@{ Name = 'SlackToken';        Tier = 'Minimal';    Category = 'Cloud-Secrets';      Severity = 'High'
         Regex = 'xox[baprs]-[A-Za-z0-9-]{10,}' }
-    [pscustomobject]@{ Name = 'GitHubToken';       Category = 'Cloud-Secrets';      Severity = 'High'
+    [pscustomobject]@{ Name = 'GitHubToken';       Tier = 'Minimal';    Category = 'Cloud-Secrets';      Severity = 'High'
         Regex = '\bgh[pousr]_[A-Za-z0-9]{36,}\b' }
-    [pscustomobject]@{ Name = 'JwtToken';          Category = 'Cloud-Secrets';      Severity = 'Medium'
+    [pscustomobject]@{ Name = 'WireGuardPeer';     Tier = 'Standard';   Category = 'VPN-Profile';        Severity = 'Medium'
+        Regex = '(?im)^\s*\[(?:Interface|Peer)\]\s*$' }
+    [pscustomobject]@{ Name = 'IPsecPSK';          Tier = 'Standard';   Category = 'VPN-Profile';        Severity = 'High'
+        Regex = '(?i)\bPSK\s+\S{3,}' }
+    [pscustomobject]@{ Name = 'CiscoType7';        Tier = 'Standard';   Category = 'VPN-Profile';        Severity = 'Medium'
+        Regex = '(?i)\b(?:password|secret)\s+7\s+[0-9A-Fa-f]{4,}' }
+    [pscustomobject]@{ Name = 'ConnStringPassword';Tier = 'Standard';   Category = 'Config-WithSecrets'; Severity = 'High'
+        Regex = '(?i)(?:data source|server|initial catalog)\s*=[^\r\n]{0,80}?(?:password|pwd)\s*=\s*\S{2,}' }
+    [pscustomobject]@{ Name = 'ApiKeyAssignment';  Tier = 'Standard';   Category = 'Cloud-Secrets';      Severity = 'High'
+        Regex = '(?i)\b(?:api[_-]?key|access[_-]?token|secret[_-]?key|client[_-]?secret|auth[_-]?token)\b\s*[:=]\s*\S{12,}' }
+    [pscustomobject]@{ Name = 'JwtToken';          Tier = 'Standard';   Category = 'Cloud-Secrets';      Severity = 'Medium'
         Regex = '\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}' }
-    [pscustomobject]@{ Name = 'USSocialSecurity';  Category = 'PII-HR-Finance';     Severity = 'Medium'
-        Regex = '\b\d{3}-\d{2}-\d{4}\b' }
+    [pscustomobject]@{ Name = 'USSocialSecurity';  Tier = 'Standard';   Category = 'PII-HR-Finance';     Severity = 'Medium'
+        # requires an SSN/social keyword next to the number -> far fewer false positives
+        Regex = '(?i)(?:ssn|social[\s._-]*security|soc[\s._-]*sec)\b[^0-9\r\n]{0,15}\d{3}-\d{2}-\d{4}\b' }
+    [pscustomobject]@{ Name = 'GenericPassword';   Tier = 'Aggressive'; Category = 'Credential-Store';   Severity = 'Medium'
+        Regex = '(?im)\b(?:password|passwd|pwd)\b\s*[:=]\s*\S{4,}' }
+    [pscustomobject]@{ Name = 'USSocialSecurityLoose'; Tier = 'Aggressive'; Category = 'PII-HR-Finance'; Severity = 'Medium'
+        # any NNN-NN-NNNN with no keyword context (noisy: matches some IDs/phone fragments)
+        Regex = '\b(?!000|666|9\d\d)\d{3}-(?!00)\d{2}-(?!0000)\d{4}\b' }
 )
-# credit-card detection is handled separately (regex candidates + Luhn validation)
+# credit-card detection is handled separately (regex candidates + Luhn validation),
+# and always runs from the Minimal tier upward because Luhn keeps it low-false-positive.
 
 # Extensions eligible for content scanning (plus extensionless files). Binary and
 # archive/office types are intentionally excluded; a null-byte probe guards the rest.
@@ -956,6 +977,13 @@ Write-AuditLog ("Total shares to scan: {0} across {1} host(s)" -f $allShares.Cou
 
 if ($allShares.Count -eq 0) { Write-AuditLog 'No shares to scan - exiting.' 'WARN'; Disconnect-AllSmbHosts; return }
 
+# -- Select content rules by tier (-ContentRuleSet) -------------------------
+$tierRank      = @{ Minimal = 0; Standard = 1; Aggressive = 2 }
+$activeContentRules = @($script:ContentRules | Where-Object { $tierRank[$_.Tier] -le $tierRank[$ContentRuleSet] })
+if ($ScanContent) {
+    Write-AuditLog ("Content scan: ON  (ruleset={0}, {1} rules + Luhn card check)" -f $ContentRuleSet, $activeContentRules.Count)
+}
+
 # -- Parallel file walk (runspace pool) -------------------------------------
 $sharesByHost = $allShares | Group-Object ComputerName
 $pool = [runspacefactory]::CreateRunspacePool(1, $ThrottleLimit)
@@ -975,7 +1003,7 @@ foreach ($g in $sharesByHost) {
         AddArgument($MaxInspectBytes).
         AddArgument($script:SecretContentRegex).
         AddArgument([bool]$ScanContent).
-        AddArgument($script:ContentRules).
+        AddArgument($activeContentRules).
         AddArgument($script:ContentExt)
     $jobs += [pscustomobject]@{ Host = $g.Name; PS = $ps; Handle = $ps.BeginInvoke() }
 }
