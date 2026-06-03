@@ -89,9 +89,11 @@ A timestamped folder (`ShareAudit_yyyyMMdd_HHmmss`) containing:
 |---|---|
 | `00_summary.json` | Run summary: counts, severity/category breakdown, **BroadlyExposed** count. |
 | `01_targets.csv` | Targets enumerated (name, OS). |
-| `02_shares.csv` | Discovered disk shares per host. |
-| `03_file_inventory.csv` | Every file walked, with metadata + **Owner**. |
-| `04_sensitive_findings.csv` / `.json` | Flagged files with **Owner, BroadAccess, full ACL**, category, severity, `MatchType` (Name/Content), pattern, and a redacted `ContentHint`. |
+| `02_shares.csv` | Discovered disk shares per host (`ComputerName` + `IPAddress`, UNC path). |
+| `03_file_inventory.csv` | Every file walked, with metadata + **Owner** (`ComputerName` + `IPAddress`). |
+| `04_sensitive_findings.csv` / `.json` | Flagged files with `ComputerName` + `IPAddress`, **Owner, BroadAccess, full ACL**, category, severity, `MatchType` (Name/Content), pattern, and a redacted `ContentHint`. |
+
+> `ComputerName` is the AD/DNS hostname; `IPAddress` is the resolved address actually scanned. When auditing from a host without the domain's DNS, names are resolved via the DC and the UNC paths use the IP — but the friendly name is preserved in its own column.
 | `05_access_errors.csv` | Paths that couldn't be read (access denied, timeouts). |
 | `audit.log` | Timestamped run log (operator, auth mode, resolutions, findings). |
 

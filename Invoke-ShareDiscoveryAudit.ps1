@@ -550,14 +550,16 @@ function Disconnect-AllSmbHosts {
 }
 
 function Get-HostShare {
-    param([string]$ComputerName, [switch]$IncludeAdminShares)
+    # ScanAddress = the address we actually connect to (may be an IP from DNS fallback);
+    # HostName / IPAddress are carried through to the output as separate columns.
+    param([string]$ScanAddress, [string]$HostName, [string]$IPAddress, [switch]$IncludeAdminShares)
 
     # STYPE constants: 0=DISK 1=PRINTQ 2=DEVICE 3=IPC; 0x80000000 = special/admin
     $STYPE_MASK    = 0x0FFFFFFF
     $STYPE_SPECIAL = 0x80000000
     $shares = @()
     try {
-        $raw = [ShareEnum]::Enumerate($ComputerName)
+        $raw = [ShareEnum]::Enumerate($ScanAddress)
     } catch {
         throw "NetShareEnum failed: $($_.Exception.Message)"
     }
@@ -567,9 +569,10 @@ function Get-HostShare {
         if ($baseType -ne 0) { continue }                      # disk shares only
         if ($isSpecial -and -not $IncludeAdminShares) { continue }  # skip C$/ADMIN$
         $shares += [pscustomobject]@{
-            ComputerName = $ComputerName
+            ComputerName = $HostName
+            IPAddress    = $IPAddress
             ShareName    = $s.Name
-            UncPath      = "\\$ComputerName\$($s.Name)"
+            UncPath      = "\\$ScanAddress\$($s.Name)"
             Remark       = $s.Remark
             IsAdminShare = $isSpecial
         }
@@ -583,7 +586,7 @@ function Get-HostShare {
 # --------------------------------------------------------------------------- #
 $script:HostScanBlock = {
     param(
-        $Computer, $Shares, $Patterns, $MaxDepth, $TimeoutSeconds,
+        $Computer, $IpAddress, $Shares, $Patterns, $MaxDepth, $TimeoutSeconds,
         $InspectConfigContent, $MaxInspectBytes, $SecretContentRegex,
         $ScanContent, $ContentRules, $ContentExt
     )
@@ -725,7 +728,7 @@ $script:HostScanBlock = {
 
     foreach ($share in $Shares) {
         if ($TimeoutSeconds -gt 0 -and $sw.Elapsed.TotalSeconds -gt $TimeoutSeconds) {
-            $errors.Add([pscustomobject]@{ ComputerName = $Computer; UncPath = $share.UncPath; Error = 'Host timeout reached - walk truncated' })
+            $errors.Add([pscustomobject]@{ ComputerName = $Computer; IPAddress = $IpAddress; UncPath = $share.UncPath; Error = 'Host timeout reached - walk truncated' })
             break
         }
 
@@ -736,7 +739,7 @@ $script:HostScanBlock = {
 
         while ($queue.Count -gt 0) {
             if ($TimeoutSeconds -gt 0 -and $sw.Elapsed.TotalSeconds -gt $TimeoutSeconds) {
-                $errors.Add([pscustomobject]@{ ComputerName = $Computer; UncPath = $share.UncPath; Error = 'Host timeout reached - walk truncated' })
+                $errors.Add([pscustomobject]@{ ComputerName = $Computer; IPAddress = $IpAddress; UncPath = $share.UncPath; Error = 'Host timeout reached - walk truncated' })
                 break
             }
             $node = $queue.Dequeue()
@@ -744,7 +747,7 @@ $script:HostScanBlock = {
             try {
                 $entries = [System.IO.DirectoryInfo]::new($node.Path).EnumerateFileSystemInfos()
             } catch {
-                $errors.Add([pscustomobject]@{ ComputerName = $Computer; UncPath = $node.Path; Error = $_.Exception.Message })
+                $errors.Add([pscustomobject]@{ ComputerName = $Computer; IPAddress = $IpAddress; UncPath = $node.Path; Error = $_.Exception.Message })
                 continue
             }
 
@@ -791,6 +794,7 @@ $script:HostScanBlock = {
                     $allCats = @(@($hits.Category) + @($contentHits.Category) | Where-Object { $_ } | Select-Object -Unique)
                     $rec = [pscustomobject]@{
                         ComputerName = $Computer
+                        IPAddress    = $IpAddress
                         ShareName    = $share.ShareName
                         FullPath     = $fi.FullName
                         FileName     = $fi.Name
@@ -817,6 +821,7 @@ $script:HostScanBlock = {
                         }
                         $findings.Add([pscustomobject]@{
                             ComputerName = $Computer
+                            IPAddress    = $IpAddress
                             ShareName    = $share.ShareName
                             FullPath     = $fi.FullName
                             FileName     = $fi.Name
@@ -837,6 +842,7 @@ $script:HostScanBlock = {
                     foreach ($c in $contentHits) {
                         $findings.Add([pscustomobject]@{
                             ComputerName = $Computer
+                            IPAddress    = $IpAddress
                             ShareName    = $share.ShareName
                             FullPath     = $fi.FullName
                             FileName     = $fi.Name
@@ -853,7 +859,7 @@ $script:HostScanBlock = {
                         })
                     }
                 } catch {
-                    $errors.Add([pscustomobject]@{ ComputerName = $Computer; UncPath = $entry.FullName; Error = $_.Exception.Message })
+                    $errors.Add([pscustomobject]@{ ComputerName = $Computer; IPAddress = $IpAddress; UncPath = $entry.FullName; Error = $_.Exception.Message })
                 }
             }
         }
@@ -927,6 +933,25 @@ function Resolve-ScanAddress {
     return $Name   # nothing worked; let the liveness probe fail it
 }
 
+# Resolve a host/scan address to an IPv4 string for the report's IPAddress column.
+function Resolve-IPv4 {
+    param([string]$Address, [string]$DnsServer)
+    if ($Address -match '^\d{1,3}(\.\d{1,3}){3}$') { return $Address }   # already an IP
+    try {
+        $ip = [System.Net.Dns]::GetHostAddresses($Address) |
+              Where-Object { $_.AddressFamily -eq 'InterNetwork' } | Select-Object -First 1
+        if ($ip) { return $ip.IPAddressToString }
+    } catch { }
+    if ($DnsServer) {
+        try {
+            $rec = Resolve-DnsName -Name $Address -Server $DnsServer -Type A -ErrorAction Stop |
+                   Where-Object { $_.IPAddress } | Select-Object -First 1
+            if ($rec) { return $rec.IPAddress }
+        } catch { }
+    }
+    return ''
+}
+
 # -- Liveness + authenticated share enumeration -----------------------------
 # Use -DnsServer if given, else the LDAP -Server, to resolve AD hostnames that
 # our local resolver cannot (common when not joined to the target domain).
@@ -940,8 +965,9 @@ foreach ($t in $targets) {
     $i++
     Write-Progress -Activity 'Enumerating shares' -Status $t.HostName -PercentComplete (($i / $targets.Count) * 100)
 
-    # resolve to a scannable address (keeps the name if it resolves locally)
-    $scan = Resolve-ScanAddress -Name $t.HostName -DnsServer $effectiveDns
+    # resolve to a scannable address (keeps the name if it resolves locally) + an IP for reporting
+    $scan   = Resolve-ScanAddress -Name $t.HostName -DnsServer $effectiveDns
+    $ipAddr = Resolve-IPv4 -Address $scan -DnsServer $effectiveDns
     if ($scan -ne $t.HostName) { Write-AuditLog "$($t.HostName): resolved via $effectiveDns -> $scan" }
 
     # reachable if it answers ICMP OR has 445 open (SMB is what we actually need)
@@ -959,7 +985,7 @@ foreach ($t in $targets) {
 
     try {
         # @() guards against a single-share scalar (Set-StrictMode forbids .Count on scalars)
-        $shares = @(Get-HostShare -ComputerName $scan -IncludeAdminShares:$IncludeAdminShares)
+        $shares = @(Get-HostShare -ScanAddress $scan -HostName $t.HostName -IPAddress $ipAddr -IncludeAdminShares:$IncludeAdminShares)
         if ($shares.Count -gt 0) {
             $liveHosts.Add($t)
             $shares | ForEach-Object { $allShares.Add($_) }
@@ -995,6 +1021,7 @@ foreach ($g in $sharesByHost) {
     $ps.RunspacePool = $pool
     $null = $ps.AddScript($script:HostScanBlock).
         AddArgument($g.Name).
+        AddArgument([string]$g.Group[0].IPAddress).
         AddArgument(@($g.Group)).
         AddArgument($script:Patterns).
         AddArgument($MaxDepth).
