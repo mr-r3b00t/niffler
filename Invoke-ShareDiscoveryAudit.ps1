@@ -324,6 +324,16 @@ function Get-FileFindings {
 # --------------------------------------------------------------------------- #
 # 1. AD computer enumeration via LDAP (no ActiveDirectory module needed)
 # --------------------------------------------------------------------------- #
+# null-safe read of a single SearchResult property (avoids StrictMode null-index)
+function Get-SrProp {
+    param($Props, $Name)
+    try {
+        $c = $Props[$Name]
+        if ($c -and $c.Count -gt 0) { return [string]$c[0] }
+    } catch { }
+    return ''
+}
+
 function Get-DomainComputer {
     param(
         [string]$SearchBase,
@@ -337,24 +347,36 @@ function Get-DomainComputer {
     # Build the LDAP prefix: a specific DC/server wins, else the domain DNS name,
     # else the workstation's own domain (default).  Server/Domain let you point at
     # a target environment you are not joined to, using -Credential.
+    $user = if ($Credential) { $Credential.UserName } else { $null }
+    $pass = if ($Credential) { $Credential.GetNetworkCredential().Password } else { $null }
     $prefix = 'LDAP://'
     if     ($Server) { $prefix = "LDAP://$Server/" }
     elseif ($Domain) { $prefix = "LDAP://$Domain/" }
 
-    $user = if ($Credential) { $Credential.UserName } else { $null }
-    $pass = if ($Credential) { $Credential.GetNetworkCredential().Password } else { $null }
-
-    if ($SearchBase) {
-        $rootPath = "$prefix$SearchBase"
+    if (-not $SearchBase -and -not $Server -and -not $Domain -and -not $Credential) {
+        # Pure integrated auth against the current domain: a default DirectorySearcher
+        # binds to the current domain's defaultNamingContext as the current user, so we
+        # never have to read RootDSE (whose .Properties indexer trips StrictMode).
+        $search = New-Object System.DirectoryServices.DirectorySearcher
     } else {
-        # discover the default naming context from RootDSE (with creds if supplied)
-        $rootDse = New-Object System.DirectoryServices.DirectoryEntry("${prefix}RootDSE", $user, $pass)
-        $dn      = $rootDse.Properties['defaultNamingContext'].Value
-        $rootPath = "$prefix$dn"
+        if ($SearchBase) {
+            $rootPath = "$prefix$SearchBase"
+        } else {
+            # discover the default naming context from RootDSE (with creds if supplied);
+            # InvokeGet returns the value directly and avoids the .Properties null-index.
+            if ($Credential) { $rootDse = New-Object System.DirectoryServices.DirectoryEntry("${prefix}RootDSE", $user, $pass) }
+            else             { $rootDse = New-Object System.DirectoryServices.DirectoryEntry("${prefix}RootDSE") }
+            $dn = $null
+            try { $dn = [string]$rootDse.InvokeGet('defaultNamingContext') } catch { }
+            if (-not $dn) {
+                throw "Could not read the domain naming context from '${prefix}RootDSE'. Ensure a domain controller is reachable, or pass -SearchBase / -Server / -Credential."
+            }
+            $rootPath = "$prefix$dn"
+        }
+        if ($Credential) { $entry = New-Object System.DirectoryServices.DirectoryEntry($rootPath, $user, $pass) }
+        else             { $entry = New-Object System.DirectoryServices.DirectoryEntry($rootPath) }
+        $search = New-Object System.DirectoryServices.DirectorySearcher($entry)
     }
-
-    $entry  = New-Object System.DirectoryServices.DirectoryEntry($rootPath, $user, $pass)
-    $search = New-Object System.DirectoryServices.DirectorySearcher($entry)
 
     # enabled computer accounts only (bit 2 = ACCOUNTDISABLE)
     $enabled = '(!userAccountControl:1.2.840.113556.1.4.803:=2)'
@@ -375,16 +397,15 @@ function Get-DomainComputer {
 
     $results = @()
     foreach ($r in $search.FindAll()) {
-        $props = $r.Properties
-        $hostName = if ($props['dnshostname'].Count) { [string]$props['dnshostname'][0] }
-                    elseif ($props['name'].Count)    { [string]$props['name'][0] }
-                    else { $null }
+        $props    = $r.Properties
+        $hostName = Get-SrProp $props 'dnshostname'
+        if (-not $hostName) { $hostName = Get-SrProp $props 'name' }
         if (-not $hostName) { continue }
         $results += [pscustomobject]@{
-            HostName = $hostName
-            Name     = if ($props['name'].Count) { [string]$props['name'][0] } else { '' }
-            OS       = if ($props['operatingsystem'].Count) { [string]$props['operatingsystem'][0] } else { '' }
-            OSVersion= if ($props['operatingsystemversion'].Count) { [string]$props['operatingsystemversion'][0] } else { '' }
+            HostName  = $hostName
+            Name      = Get-SrProp $props 'name'
+            OS        = Get-SrProp $props 'operatingsystem'
+            OSVersion = Get-SrProp $props 'operatingsystemversion'
         }
     }
     Write-AuditLog ("AD returned {0} computer object(s)." -f $results.Count)
