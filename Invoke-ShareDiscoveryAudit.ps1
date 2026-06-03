@@ -73,6 +73,12 @@
 .PARAMETER MaxInspectBytes
     Cap on bytes read per file for -InspectConfigContent and -ScanContent. Default 262144.
 
+.PARAMETER ExcludeName
+    Additional filename wildcard(s) to skip entirely (no inventory, no findings).
+    Added to the built-in noise list (Thumbs.db, ehthumbs.db, desktop.ini, .DS_Store).
+    Note: a '.key' file over ~100 KB is treated as an Apple Keynote/iWork document
+    (not a private key) and is not flagged - decided on file size alone, no content read.
+
 .EXAMPLE
     .\Invoke-ShareDiscoveryAudit.ps1 -TargetType Servers -Verbose
 
@@ -126,7 +132,8 @@ param(
                                     # secret/PII rules regardless of filename (reads CONTENT)
     [ValidateSet('Minimal', 'Standard', 'Aggressive')]
     [string]   $ContentRuleSet = 'Standard',  # which -ScanContent rules to run (FP vs coverage)
-    [int]      $MaxInspectBytes = 262144
+    [int]      $MaxInspectBytes = 262144,
+    [string[]] $ExcludeName     # extra filename wildcards to skip entirely (added to built-in noise list)
 )
 
 Set-StrictMode -Version 2.0
@@ -303,6 +310,15 @@ $script:ContentExt = @('.txt','.text','.conf','.config','.cnf','.ini','.env','.p
     '.pl','.php','.rb','.js','.ts','.sql','.md','.markdown','.csv','.tsv','.log','.reg','.tf',
     '.tfvars','.secrets','.pcf','.ovpn','.pbk','.nmconnection','.mobileconfig','.pem','.key',
     '.ppk','.crt','.cer','.netrc','.htpasswd','.gitconfig')
+
+# Filenames skipped entirely during the walk (no inventory, no findings). Wildcards ok.
+# OS/UI cruft that is pure noise in a data-access audit; extend at runtime with -ExcludeName.
+$script:ExcludeNames = @('Thumbs.db', 'ehthumbs.db', 'desktop.ini', '.DS_Store')
+
+# A '.key' file is a TLS/SSH private key (small text) OR an Apple Keynote/iWork document
+# (a ZIP package, almost always >100 KB). Drop the key match above this size to avoid
+# flagging Keynote files - decided on metadata only, so no file content is read.
+$script:KeyFileMaxBytes = 102400
 
 function Get-FileFindings {
     <# returns the matching pattern objects for a given file name (may be 0..n) #>
@@ -609,7 +625,7 @@ $script:HostScanBlock = {
     param(
         $Computer, $IpAddress, $Shares, $Patterns, $MaxDepth, $TimeoutSeconds,
         $InspectConfigContent, $MaxInspectBytes, $SecretContentRegex,
-        $ScanContent, $ContentRules, $ContentExt
+        $ScanContent, $ContentRules, $ContentExt, $ExcludeNames, $KeyFileMaxBytes
     )
 
     $sw         = [System.Diagnostics.Stopwatch]::StartNew()
@@ -783,10 +799,23 @@ $script:HostScanBlock = {
                     }
 
                     $fi   = [System.IO.FileInfo]$entry
+
+                    # skip excluded noise filenames entirely (Thumbs.db, desktop.ini, ...)
+                    $excluded = $false
+                    foreach ($x in $ExcludeNames) { if ($fi.Name -like $x) { $excluded = $true; break } }
+                    if ($excluded) { continue }
+
                     # @() forces an array: a single match unwraps to a scalar PSCustomObject
                     # whose $_.Count is $null (no StrictMode in the runspace), which would
                     # silently route flagged files down the no-ACL branch.
                     $hits = @(Test-Name -Name $fi.Name -Patterns $Patterns)
+
+                    # Apple Keynote/iWork files are also '.key' (ZIP packages, typically large).
+                    # A real private key is a small text file, so drop the *.key key-match for
+                    # files bigger than the key-size ceiling - metadata only, no content read.
+                    if ($fi.Extension -eq '.key' -and $fi.Length -gt $KeyFileMaxBytes) {
+                        $hits = @($hits | Where-Object { $_.Pattern -ne '*.key' })
+                    }
 
                     # optional deep content scan (reads bytes) on eligible text files
                     $contentHits = @()
@@ -1024,6 +1053,10 @@ Write-AuditLog ("Total shares to scan: {0} across {1} host(s)" -f $allShares.Cou
 
 if ($allShares.Count -eq 0) { Write-AuditLog 'No shares to scan - exiting.' 'WARN'; Disconnect-AllSmbHosts; return }
 
+# -- Build exclusion list (built-in noise + caller's -ExcludeName) -----------
+$excludeNames = @(@($script:ExcludeNames) + @($ExcludeName) | Where-Object { $_ } | Select-Object -Unique)
+Write-AuditLog ("Excluded filename patterns: {0}" -f ($excludeNames -join ', '))
+
 # -- Select content rules by tier (-ContentRuleSet) -------------------------
 $tierRank      = @{ Minimal = 0; Standard = 1; Aggressive = 2 }
 $activeContentRules = @($script:ContentRules | Where-Object { $tierRank[$_.Tier] -le $tierRank[$ContentRuleSet] })
@@ -1052,7 +1085,9 @@ foreach ($g in $sharesByHost) {
         AddArgument($script:SecretContentRegex).
         AddArgument([bool]$ScanContent).
         AddArgument($activeContentRules).
-        AddArgument($script:ContentExt)
+        AddArgument($script:ContentExt).
+        AddArgument($excludeNames).
+        AddArgument($script:KeyFileMaxBytes)
     $jobs += [pscustomobject]@{ Host = $g.Name; PS = $ps; Handle = $ps.BeginInvoke() }
 }
 

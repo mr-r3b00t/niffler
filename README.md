@@ -77,6 +77,7 @@ It runs with the rights of an ordinary domain user from a domain‑joined workst
 | `-ScanContent` | off | **Deep content scan** (reads bytes): runs secret/PII rules over eligible text files regardless of filename. See *Content detection* below. Reads content — authorization required. |
 | `-ContentRuleSet <Minimal\|Standard\|Aggressive>` | `Standard` | Which `-ScanContent` rules run, trading false positives for coverage. |
 | `-MaxInspectBytes <n>` | `262144` | Byte cap per file for `-InspectConfigContent` / `-ScanContent`. |
+| `-ExcludeName <pat[]>` | *(see below)* | Extra filename wildcards to skip entirely, added to the built-in noise list. |
 | `-OutputDirectory <path>` | `.\ShareAudit_<timestamp>` | Where results are written. |
 
 ---
@@ -127,6 +128,11 @@ Matching is **case‑insensitive wildcard** on the file name/extension. Categori
 | Remote‑Access | Low | `*.rdp`, `*.rdg`, `*.ica`, `*.sdtid` |
 
 > The categories above are matched by **filename**. To catch renamed / misspelled / plainly‑named files, add `-ScanContent` (below).
+
+### Exclusions & ambiguous extensions
+
+- **Noise files** are skipped entirely (no inventory, no findings): `Thumbs.db`, `ehthumbs.db`, `desktop.ini`, `.DS_Store`. Add more with `-ExcludeName '*.tmp','~$*'`.
+- **`.key` is ambiguous** — a TLS/SSH private key *or* an Apple **Keynote/iWork** document. Since real keys are tiny text files and Keynote files are ZIP packages (almost always > 100 KB), a `.key` file **over ~100 KB is treated as a document and not flagged**. This is decided on **file size only — no content is read** — so the read‑only guarantee holds. Small `.key` files are still flagged as potential private keys (and, with `-ScanContent`, confirmed by the `PrivateKeyBlock` content rule).
 
 ---
 
