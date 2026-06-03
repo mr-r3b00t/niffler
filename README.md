@@ -137,6 +137,18 @@ With `-ScanContent`, the tool also reads the *bytes* of eligible text files and 
 - **Redaction:** matched values are **masked** before being written (e.g. `pas********!!`, `411***11`) so the report never stores the raw secret.
 - **Output:** content findings appear in `04_sensitive_findings.csv` with `MatchType = Content`, `Pattern = content:<RuleName>`, and a redacted sample in `ContentHint` (`<count>x <masked>`). They get the same Owner / ACL / BroadAccess enrichment as name findings.
 
+### Rule sets (`-ContentRuleSet`)
+
+Each rule is tiered by confidence; the switch picks how aggressively to match:
+
+| Set | Rules | What it adds | Use when |
+|---|---|---|---|
+| `Minimal` | 8 + Luhn cards | High‑confidence only: private keys, AWS/Azure/Slack/GitHub tokens, WireGuard keys, Luhn‑valid cards | Large/noisy shares; you only want near‑certain hits |
+| `Standard` *(default)* | 15 + Luhn cards | + VPN PSKs, Cisco type‑7, connection‑string & API‑key assignments, JWTs, **keyword‑anchored SSNs** | Most audits |
+| `Aggressive` | 17 + Luhn cards | + generic `password=` assignments and **bare `NNN‑NN‑NNNN` SSNs** | Deep sweeps where misses cost more than false positives |
+
+The Luhn‑validated credit‑card check always runs with `-ScanContent`. SSNs in `Standard` require an adjacent `SSN`/`social security` keyword (so `order 123‑45‑6789 ref` is ignored); `Aggressive` flags any structurally‑valid SSN.
+
 ---
 
 ## How it works
